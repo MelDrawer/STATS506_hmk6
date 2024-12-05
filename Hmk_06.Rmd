@@ -1,0 +1,231 @@
+---
+title: "Hmk06"
+author: "Ziyi Tao"
+output: html_document
+date: "2024-11-30"
+---
+
+Github : <https://github.com/MelDrawer/Stats506_Hmk6.git>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Problem 1
+
+### a. Estimate standard deviation
+
+a.1 Average RF for each team:
+
+```{r}
+library(DBI)
+library(tidyr)
+library(dplyr)
+
+# import data
+lahman <- dbConnect(RSQLite::SQLite(), 
+                    "D:/lahman_1871-2022.sqlite")
+fielding <- dbGetQuery(lahman, "SELECT * FROM fielding")
+```
+
+```{r}
+fielding %>%
+filter(InnOuts !=0)%>%
+group_by(teamID) %>%
+mutate(RF = 3*(PO+A)/InnOuts)%>%
+summarize(mean_RF = mean(RF, na.rm = TRUE))%>%
+arrange(-mean_RF) -> mean_rf
+
+head(mean_rf)
+```
+
+a.2 Estimate without parallel processing:
+
+```{r}
+# 1 drop InnOuts == 0
+fielding %>%
+  filter(InnOuts !=0)%>%
+  mutate(RF = 3*(PO+A)/InnOuts) -> fielding_1
+
+# 2 set boots numbers
+boots <- 1000
+
+# 3 stratified bootstrap function
+#' boot
+#' @param team_data
+#' @return the mean RF of each bootstarpped sample of one team
+boot <- function(team_data){
+  sample_boot <- sample(team_data$RF, replace = TRUE) 
+  boot_meanrf <- mean(sample_boot, na.rm = TRUE)
+  return(boot_meanrf)
+}
+
+
+```
+
+```{r}
+# 4 without parallel processing
+estimate_sd <- data.frame(team = unique(fielding_1$teamID), 
+                           sd_boot = NA, meanrf_boot = NA)
+
+for(id in unique(fielding_1$teamID)){
+  for(i in 1:boots){
+    boot_meanrf[i] = boot(fielding_1[fielding_1$teamID == id,])
+  }
+  estimate_sd[estimate_sd$team == id, "sd_boot"] =  sd(boot_meanrf)
+  estimate_sd[estimate_sd$team == id, "meanrf_boot"] =  mean(boot_meanrf)
+}
+
+```
+
+```{r}
+head(estimate_sd)
+```
+
+a\. 3 Using parallel processing with parallel package
+
+```{r}
+library(parallelly)
+library(parallel)
+boots <- 1000
+
+
+#' boot_n
+#' @param team 
+#' @param boots 
+#' @return the standard deviation in bootstrap simulations and the estimated mean of rf given certain team
+boot_n <- function(team, boots){
+  boot_meanrf <- rep(NA, boots)
+  team_data <- fielding_1[fielding_1$teamID == team,]
+  for(i in 1:boots){
+    sample_boot <- sample(team_data$RF, replace = TRUE) 
+    boot_meanrf[i] <- mean(sample_boot, na.rm = TRUE)
+  }
+  return(c(sd(boot_meanrf), mean(boot_meanrf)))
+}
+
+
+cl <- makeCluster(8)
+clusterExport(cl, c("fielding_1", "boot_meanrf", "boots"))
+res_parallel <- parSapply(cl, 
+                          unique(fielding_1$teamID), 
+                          boot_n, boots)
+stopCluster(cl)
+
+```
+
+```{r}
+estimate_sd_parallel <- data.frame(sd_boot = res_parallel[1,], 
+                    team = colnames(res_parallel), 
+                    mearf_boot = res_parallel[2,])
+
+head(estimate_sd_parallel)
+```
+
+a.4 Using future with future package
+
+```{r}
+library(future)
+
+teams <- unique(fielding_1$teamID)
+
+#' boot_teams
+#' @param teams 
+#' @param boots 
+#' @return the estimated meanrf and standard deviation of meanrf for teams
+boot_teams <- function(teams, boots){
+  res <- as.data.frame(cbind(team = teams, sd_boot = NA, meanrf_boot = NA))
+  for(i in teams){
+    res[res$team == i, "sd_boot"] = boot_n(i, boots)[1]
+    res[res$team == i, "meanrf_boot"] = boot_n(i, boots)[2]
+  }
+  return (res)
+}
+
+plan(multisession)
+b1 %<-% boot_teams(teams[1:35], 1000)
+b2 %<-% boot_teams(teams[36:70], 1000)
+b3 %<-% boot_teams(teams[71:105], 1000)
+b4 %<-% boot_teams(teams[106:140], 1000)
+res_future <- rbind(b1, b2, b3 ,b4)
+plan(sequential)
+
+
+```
+
+```{r}
+head(res_future)
+```
+
+### b. Show final result
+
+```{r}
+# select top 10 teams
+teams_top10 <- mean_rf[1:10,]
+
+# without parallel
+res_1 <- merge(teams_top10, estimate_sd, 
+               by.y = "team", by.x = "teamID")
+res_1[order(res_1$mean_RF, decreasing = TRUE),]
+```
+
+```{r}
+# with parallel
+res_2 <- merge(teams_top10, estimate_sd_parallel, 
+               by.y = "team", by.x = "teamID")
+res_2[order(res_2$mean_RF, decreasing = TRUE),]
+```
+
+```{r}
+# future
+res_3 <- merge(teams_top10, res_future, 
+               by.y = "team", by.x = "teamID")
+res_3[order(res_3$mean_RF, decreasing = TRUE),]
+```
+
+### c. Discussion
+
+As is shown in the result, bootstrap without any parallel processing has the longest running time 945.57s while parallel processing using 8 clusters has the shortest running time 7.20s, this shows that parallel processing can greatly increase the running speed. When we use future package, the running time is also greatly decreased.
+
+```{r}
+# with out parallel
+system.time({
+  estimate_sd <- data.frame(team = unique(fielding_1$teamID), 
+                           sd_boot = NA, meanrf_boot = NA)
+
+  for(id in unique(fielding_1$teamID)){
+    for(i in 1:boots){
+      boot_meanrf[i] = boot(fielding_1[fielding_1$teamID == id,])
+    }
+    estimate_sd[estimate_sd$team == id, "sd_boot"] =  sd(boot_meanrf)
+    estimate_sd[estimate_sd$team == id, "meanrf_boot"] =  mean(boot_meanrf)
+  }
+})
+
+
+```
+
+```{r}
+# parallel
+system.time({
+  cl <- makeCluster(8)
+  clusterExport(cl, c("fielding_1", "boot_meanrf", "boots"))
+  res_parallel <- parSapply(cl, 
+                            unique(fielding_1$teamID), 
+                            boot_n, boots)
+  stopCluster(cl)
+  
+})
+```
+
+```{r}
+system.time({
+  plan(multisession)
+  b1 %<-% boot_teams(teams[1:35], 1000)
+  b2 %<-% boot_teams(teams[36:70], 1000)
+  b3 %<-% boot_teams(teams[71:105], 1000)
+  b4 %<-% boot_teams(teams[106:140], 1000)
+  res_future <- rbind(b1, b2, b3 ,b4)
+  plan(sequential)
+})
+```
